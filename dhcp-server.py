@@ -3,6 +3,8 @@ from enum import Enum
 import ipaddress
 import binascii
 import time
+import csv
+import os
 
 devices = []
 leases = []
@@ -14,6 +16,8 @@ gateway_ip = server_ip
 subnet_mask = "255.255.255.0"
 
 store_leases_for = 120 # 2 minutes
+leases_file = "leases.csv"
+lease_time = 120
 
 broadcast_ip = "255.255.255.255"
 broadcast_mac = "ff:ff:ff:ff:ff:ff"
@@ -42,13 +46,46 @@ class Device:
     def __init__(self, mac):
         self.mac = mac
 
-def new_lease(device, ip, expires=None, ack=False):
-    lease = Lease(device, ip, expires, ack)
-    leases.add(lease)
+def load_leases():
+
+    if os.path.isfile(leases_file):   
+
+        with open(leases_file, mode='r') as csv_file:
+            csv_reader = csv.reader(csv_file, delimiter=',')
+            for row in csv_reader:
+                if len(row) == 0:
+                    continue
+                device = Device(row[0])
+                ip = ipaddress.IPv4Address(row[1])
+                expires = float(row[2])
+                if expires == '':
+                    expires = None
+                new_lease(device, ip, expires)
+
+    print("Loaded " + str(len(leases)) + " leases")
+
+def save_leases():
+
+    with open(leases_file, mode='w+') as csv_file:
+        csv_writer = csv.writer(csv_file, delimiter=',')
+        for lease in leases:
+            csv_writer.writerow([lease.device.mac, str(lease.ip), lease.expires])
+
+def new_lease(device, ip, expires=None):
+    print("Created lease")
+    lease = Lease(device, ip, expires)
+    leases.append(lease)
+    save_leases()
+    return lease
+
+def renew_lease(lease, expires):
+    lease.expires = expires
+    save_leases()
+    return lease
 
 def get_lease_by_ip(ip):
     for lease in leases:
-        if lease.ip == ip:
+        if lease.ip == ip or lease.ip == ipaddress.IPv4Address(ip):
             return lease
 
 def get_lease_by_device(device):
@@ -58,6 +95,7 @@ def get_lease_by_device(device):
 
 def free_lease(lease):
     leases.remove(lease)
+    save_leases()
 
 def get_device(mac):
 
@@ -70,7 +108,7 @@ def new_device(mac):
     device = Device(mac)
     devices.append(device)
 
-    print("New device found (" + device.mac + ")")
+    return device
 
 def handle_dhcp_packet(packet):
 
@@ -94,9 +132,9 @@ def handle_dhcp_packet(packet):
                 lease = get_lease_by_ip(ipaddress.IPv4Address(ip_int))
                 
                 if lease is None:
-                    lease = new_lease(device, ipaddress.IPv4Address(ip_int))
+                    lease = new_lease(device, ipaddress.IPv4Address(ip_int), time.time() + lease_time)
                     offer_ip(reply, lease.ip)
-                    print("Offered " + lease.ip + " to " + packet.src)
+                    print("Offered " + str(lease.ip) + " to " + packet.src)
                     break
                 
                 elif lease.expires is not None and lease.expires + store_leases_for < time.time():
@@ -104,22 +142,27 @@ def handle_dhcp_packet(packet):
                     free_lease(lease)
                     lease = new_lease(device, ipaddress.IPv4Address(ip_int))
                     offer_ip(reply, lease.ip)
-                    print("Offered " + lease.ip + " to " + packet.src + " (IP previously belonged to this device)")
+                    print("Offered " + str(lease.ip) + " to " + packet.src + " (IP previously belonged to this device)")
                     break
 
-            print("Failed to create a provisional lease for " + device.mac)
-            print("This may be because there are no free IP addresses")
-            exit()
+            if lease is None:
+
+                print("Failed to create a provisional lease for " + device.mac)
+                print("This may be because there are no free IP addresses")
+                exit()
 
         else:
 
             # Lease exists and has not expired, re-offer IP
             offer_ip(reply, lease.ip)
-            print("Offered " + lease.ip + " to " + packet.src)
+            print("Offered " + str(lease.ip) + " to " + packet.src)
 
     elif dhcp_type == DHCPType.REQUEST:
         
         requested_ip = get_dhcp_option(packet, 'requested_addr')
+
+        if requested_ip is None:
+            requested_ip = packet[IP].src
 
         print("Received request from " + packet.src + " for " + requested_ip)
 
@@ -129,9 +172,14 @@ def handle_dhcp_packet(packet):
             return 
 
         lease = get_lease_by_ip(requested_ip)
-        if lease is None or lease.mac == device.mac:
+        if lease is None or lease.device.mac == device.mac:
+            if lease is None:
+                print("Accepted request from " + packet.src + " for " + requested_ip)
+                new_lease(device, requested_ip, time.time() + lease_time)
+            else:
+                print("Renewed existing lease of " + requested_ip + " for " + packet.src)
+                renew_lease(lease, time.time() + lease_time)
             ack_request(reply, requested_ip)
-            print("Accepted request from " + packet.src + " for " + requested_ip)
         else:
             nak_request(reply)
             print("Rejected request from " + packet.src + " for " + requested_ip + " because that lease is taken by another device")
@@ -170,7 +218,7 @@ def ack_request(packet, client_ip):
 
     packet[BOOTP].yiaddr = client_ip
 
-    packet[DHCP].options = [('message-type', 'ack'), ('end')]
+    packet[DHCP].options = [('message-type', 'ack'), ('lease_time', lease_time), ('end')]
 
     sendp(packet, iface=iface, verbose=False)
 
@@ -179,6 +227,8 @@ def nak_request(packet):
     packet[DHCP].options = [('message-type', 'nak'), ('end')]
 
     sendp(packet, iface=iface, verbose=False)
+
+load_leases()
 
 IFACES.show()
 interface_id = int(input("Which interface should the DHCP server run on? (enter index): "))
