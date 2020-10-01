@@ -64,22 +64,35 @@ def load_leases():
 
     print("Loaded " + str(len(leases)) + " leases")
 
+def show_leases():
+
+    print("----------------------------------")
+    for lease in leases:
+        print(lease.device.mac + " - " + str(lease.ip))
+    print("----------------------------------")
+
 def save_leases():
 
-    with open(leases_file, mode='w+') as csv_file:
-        csv_writer = csv.writer(csv_file, delimiter=',')
-        for lease in leases:
-            csv_writer.writerow([lease.device.mac, str(lease.ip), lease.expires])
+    try:
+        with open(leases_file, mode='w+', newline='') as csv_file:
+            csv_writer = csv.writer(csv_file, delimiter=',')
+            for lease in leases:
+                if lease.device is None or lease.ip is None:
+                    continue
+                csv_writer.writerow([lease.device.mac, str(lease.ip), str(lease.expires)])
+    except Exception as e:
+        print(e)
 
 def new_lease(device, ip, expires=None):
-    print("Created lease")
     lease = Lease(device, ip, expires)
     leases.append(lease)
+    print("New lease: " + lease.device.mac + " - " + str(lease.ip) + " - " + str(lease.expires - time.time()))
     save_leases()
     return lease
 
 def renew_lease(lease, expires):
     lease.expires = expires
+    print("Renew lease: " + lease.device.mac + " - " + str(lease.ip) + " - " + str(lease.expires - time.time()))
     save_leases()
     return lease
 
@@ -95,7 +108,6 @@ def get_lease_by_device(device):
 
 def free_lease(lease):
     leases.remove(lease)
-    save_leases()
 
 def get_device(mac):
 
@@ -140,6 +152,7 @@ def handle_dhcp_packet(packet):
                 elif lease.expires is not None and lease.expires + store_leases_for < time.time():
                     # Lease exists but has expired so should be used up
                     free_lease(lease)
+                    print("Cleared an expired lease")
                     lease = new_lease(device, ipaddress.IPv4Address(ip_int))
                     offer_ip(reply, lease.ip)
                     print("Offered " + str(lease.ip) + " to " + packet.src + " (IP previously belonged to this device)")
